@@ -142,13 +142,24 @@ function setupEventListeners() {
     document.getElementById('btn-crack-rsa').addEventListener('click', crackRSA);
     document.getElementById('btn-acquire-hash').addEventListener('click', acquireHashPower);
     document.getElementById('btn-mine-block').addEventListener('click', mineAttackBlock);
+    document.getElementById('btn-mine-multiple').addEventListener('click', mineMultipleAttack);
+    document.getElementById('btn-enable-sybil').addEventListener('click', enableSybil);
     document.getElementById('btn-mine-honest').addEventListener('click', mineHonestBlock);
     document.getElementById('btn-broadcast').addEventListener('click', broadcastChain);
     document.getElementById('btn-enable-cbl').addEventListener('click', enableCBL);
-    document.getElementById('btn-enable-stake').addEventListener('click', enableStakeCBL);
+    document.getElementById('btn-enable-zk-stake').addEventListener('click', enableZKStake);
+    document.getElementById('btn-enable-ecc').addEventListener('click', enableECC);
+    document.getElementById('btn-enable-zk-cbl').addEventListener('click', enableZKCBL);
     document.getElementById('btn-reset').addEventListener('click', resetSimulation);
-    document.getElementById('btn-expand-details').addEventListener('click', toggleDetails);
-    document.getElementById('btn-clear-flow').addEventListener('click', clearFlow);
+    
+    // Terminal controls
+    const clearBtn = document.getElementById('btn-clear-terminal');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            const terminalEl = document.getElementById('terminal-output');
+            if (terminalEl) terminalEl.innerHTML = '';
+        });
+    }
 }
 
 function startPolling() {
@@ -160,16 +171,180 @@ async function updateState() {
     try {
         const response = await fetch(`${API_BASE}/api/state`);
         const state = await response.json();
-
+        
         updateBlockchainVisualization(state);
-        updateWalletBalances(state.wallets);
-        updateLogs(state.logs);
-        updateStatus(state);
         updateDefenseStatus(state);
-        updateCodeFlowVisualization(state);
-        updateFunctionStack(state);
+        updateAttackStatus(state);
+        updateTerminalOutput(state);
+        updateTerminalOutput(state);
     } catch (error) {
         console.error('Error updating state:', error);
+    }
+}
+
+function updateTerminalOutput(state) {
+    const terminalEl = document.getElementById('terminal-output');
+    if (!terminalEl) return;
+    
+    terminalEl.innerHTML = '';
+    
+    // Show execution tracker steps
+    if (state.execution_tracker && state.execution_tracker.steps) {
+        const steps = state.execution_tracker.steps;
+        const recentSteps = steps.slice(-100); // Last 100 steps for better visibility
+        
+        if (recentSteps.length === 0) {
+            const emptyLine = document.createElement('div');
+            emptyLine.className = 'terminal-line info';
+            emptyLine.textContent = 'No execution steps yet. Click buttons to see code execution...';
+            terminalEl.appendChild(emptyLine);
+            return;
+        }
+        
+        recentSteps.forEach(step => {
+            const line = document.createElement('div');
+            line.className = 'terminal-line';
+            
+            const timestamp = new Date(step.timestamp * 1000).toLocaleTimeString();
+            const timestampSpan = document.createElement('span');
+            timestampSpan.className = 'terminal-timestamp';
+            timestampSpan.textContent = `[${timestamp}]`;
+            line.appendChild(timestampSpan);
+            
+            // Add function name if present
+            if (step.function) {
+                const funcSpan = document.createElement('span');
+                funcSpan.className = 'terminal-line function';
+                funcSpan.textContent = `${step.function} → `;
+                line.appendChild(funcSpan);
+            }
+            
+            // Add step name
+            const stepSpan = document.createElement('span');
+            stepSpan.className = 'terminal-line step';
+            stepSpan.textContent = step.step;
+            line.appendChild(stepSpan);
+            
+            // Add status
+            if (step.status === 'passed') {
+                line.classList.add('success');
+                const checkSpan = document.createElement('span');
+                checkSpan.textContent = ' ✓';
+                checkSpan.style.color = '#4ec9b0';
+                line.appendChild(checkSpan);
+            } else if (step.status === 'failed') {
+                line.classList.add('error');
+                const xSpan = document.createElement('span');
+                xSpan.textContent = ' ✗';
+                xSpan.style.color = '#f48771';
+                line.appendChild(xSpan);
+            } else {
+                line.classList.add('info');
+            }
+            
+            // Add details if present
+            if (step.details) {
+                const detailsDiv = document.createElement('div');
+                detailsDiv.className = 'terminal-line info';
+                detailsDiv.style.marginLeft = '20px';
+                detailsDiv.style.marginTop = '2px';
+                detailsDiv.textContent = `  → ${step.details}`;
+                line.appendChild(detailsDiv);
+            }
+            
+            // Add code snippet if present (shows real code logic)
+            if (step.code_snippet) {
+                const codeDiv = document.createElement('div');
+                codeDiv.className = 'terminal-line code';
+                codeDiv.style.marginLeft = '20px';
+                codeDiv.style.marginTop = '4px';
+                codeDiv.style.padding = '4px 8px';
+                codeDiv.style.backgroundColor = '#252526';
+                codeDiv.style.borderLeft = '3px solid #007acc';
+                codeDiv.style.borderRadius = '2px';
+                codeDiv.textContent = step.code_snippet.split('\n').map(l => `    ${l}`).join('\n');
+                line.appendChild(codeDiv);
+            }
+            
+            // Add security context if present
+            if (step.security_context) {
+                const ctxDiv = document.createElement('div');
+                ctxDiv.className = 'terminal-line warning';
+                ctxDiv.style.marginLeft = '20px';
+                ctxDiv.style.fontSize = '0.85em';
+                ctxDiv.style.marginTop = '2px';
+                ctxDiv.textContent = `  [${step.security_context}]`;
+                line.appendChild(ctxDiv);
+            }
+            
+            terminalEl.appendChild(line);
+        });
+    } else {
+        const emptyLine = document.createElement('div');
+        emptyLine.className = 'terminal-line info';
+        emptyLine.textContent = 'No execution steps yet. Click buttons to see code execution...';
+        terminalEl.appendChild(emptyLine);
+    }
+    
+    // Show current function call stack
+    if (state.execution_tracker && state.execution_tracker.call_stack && state.execution_tracker.call_stack.length > 0) {
+        const stackLine = document.createElement('div');
+        stackLine.className = 'terminal-line function';
+        stackLine.style.marginTop = '10px';
+        stackLine.style.borderTop = '1px solid #444';
+        stackLine.style.paddingTop = '8px';
+        stackLine.textContent = `📚 Call Stack: ${state.execution_tracker.call_stack.join(' → ')}`;
+        terminalEl.appendChild(stackLine);
+    }
+    
+    // Show blockchain state info (proof it's real, not mocked)
+    if (state.honest_chain && state.attack_chain) {
+        const stateLine = document.createElement('div');
+        stateLine.className = 'terminal-line info';
+        stateLine.style.marginTop = '10px';
+        stateLine.style.borderTop = '1px solid #444';
+        stateLine.style.paddingTop = '8px';
+        stateLine.textContent = `⛓️ Blockchain State: Honest Chain Height=${state.honest_chain.length}, Attack Chain Height=${state.attack_chain.length}, Defense Mode=${state.defense_mode || 'LEGACY'}`;
+        terminalEl.appendChild(stateLine);
+    }
+    
+    // Auto-scroll to bottom
+    terminalEl.scrollTop = terminalEl.scrollHeight;
+}
+
+function updateAttackStatus(state) {
+    const aliceStatusEl = document.getElementById('alice-status');
+    const hashPowerEl = document.getElementById('hash-power');
+    const attackBlocksEl = document.getElementById('attack-blocks');
+    const sybilStatusEl = document.getElementById('sybil-status');
+    const sybilItemEl = document.getElementById('sybil-status-item');
+    
+    // Alice status
+    if (state.wallets && state.wallets.Alice) {
+        aliceStatusEl.textContent = state.wallets.Alice.is_compromised ? 'Compromised' : 'Secure';
+        aliceStatusEl.className = `status-badge ${state.wallets.Alice.is_compromised ? 'danger' : 'success'}`;
+    }
+    
+    // Hash power
+    if (state.hash_power_distribution) {
+        hashPowerEl.textContent = `${state.hash_power_distribution.Eve || 0}%`;
+        hashPowerEl.className = `status-badge ${state.hash_power_distribution.Eve >= 51 ? 'danger' : 'warning'}`;
+    }
+    
+    // Attack blocks
+    attackBlocksEl.textContent = state.attack_chain ? state.attack_chain.length : 0;
+    
+    // Sybil status
+    if (state.use_sybil) {
+        sybilItemEl.style.display = 'flex';
+        sybilStatusEl.textContent = 'ACTIVE';
+        sybilStatusEl.className = 'status-badge danger';
+        document.getElementById('btn-enable-sybil').style.display = 'none';
+    } else {
+        sybilItemEl.style.display = 'none';
+        if (state.defense_mode === 'CBL') {
+            document.getElementById('btn-enable-sybil').style.display = 'block';
+        }
     }
 }
 
@@ -228,13 +403,19 @@ function updateBlockchainVisualization(state) {
             const txInfo = block.transactions.length > 0
                 ? `${block.transactions[0].from_addr}->${block.transactions[0].to_addr} ${block.transactions[0].amount} BTC`
                 : 'Empty';
+            
+            // Check if this is a Sybil attack (Eve_A or Eve_B)
+            const isSybil = block.miner.startsWith('Eve_');
+            const minerLabel = block.miner.substring(0, 10);
+            const attackLabel = isSybil ? '[SYBIL]' : '[ATTACK]';
 
             nodeMap.set(nodeId, {
                 id: nodeId,
-                label: `#${block.index}\n${block.miner.substring(0, 10)}\n${txInfo}\n[ATTACK]`,
-                color: '#d32f2f',
-                borderWidth: 3,
-                borderColor: '#000000',
+                label: `#${block.index}\n${minerLabel}\n${txInfo}\n${attackLabel}`,
+                color: isSybil ? '#9c27b0' : '#d32f2f',  // Purple for Sybil, red for regular attack
+                borderWidth: isSybil ? 4 : 3,
+                borderColor: isSybil ? '#7b1fa2' : '#000000',
+                borderStyle: isSybil ? 'dashed' : 'solid',
                 shape: 'box',
                 font: {
                     size: 11,
@@ -335,24 +516,56 @@ function updateStatus(state) {
 
     const attackBlocks = state.attack_chain?.length || 0;
     document.getElementById('attack-blocks').textContent = Math.max(0, attackBlocks - 1); // Exclude genesis
+    
+    // Show Sybil status
+    const sybilStatus = document.getElementById('sybil-status');
+    if (sybilStatus) {
+        if (state.use_sybil) {
+            sybilStatus.textContent = 'ACTIVE';
+            sybilStatus.className = 'status-badge';
+            sybilStatus.style.background = '#9c27b0';
+        } else {
+            sybilStatus.textContent = 'INACTIVE';
+            sybilStatus.className = 'status-badge';
+            sybilStatus.style.background = '#e0e0e0';
+        }
+    }
 }
 
 function updateDefenseStatus(state) {
+    const modeEl = document.getElementById('defense-mode');
+    const cryptoEl = document.getElementById('crypto-status');
+    const cblEl = document.getElementById('cbl-status');
+    const zkEl = document.getElementById('zk-status');
+    const hashMethodEl = document.getElementById('hash-method');
+    
     const mode = state.defense_mode || 'LEGACY';
-    document.getElementById('defense-mode').textContent = mode;
-    document.getElementById('defense-mode').className = mode === 'LEGACY' ? 'defense-badge inactive' :
-        mode === 'CBL' ? 'defense-badge active' :
-            'defense-badge active';
-
-    const isECC = state.wallets?.Alice?.is_ecc || false;
-    document.getElementById('crypto-status').textContent = isECC ? 'ECC (Secure)' : 'RSA (Weak)';
-    document.getElementById('crypto-status').className = isECC ? 'defense-badge active' : 'defense-badge inactive';
-
-    document.getElementById('cbl-status').textContent = mode === 'CBL' || mode === 'STAKE_CBL' ? 'ACTIVE' : 'INACTIVE';
-    document.getElementById('cbl-status').className = mode === 'CBL' || mode === 'STAKE_CBL' ? 'defense-badge active' : 'defense-badge inactive';
-
-    document.getElementById('stake-status').textContent = mode === 'STAKE_CBL' ? 'ACTIVE' : 'INACTIVE';
-    document.getElementById('stake-status').className = mode === 'STAKE_CBL' ? 'defense-badge active' : 'defense-badge inactive';
+    modeEl.textContent = mode;
+    modeEl.className = `defense-badge ${mode === 'LEGACY' ? 'inactive' : 'active'}`;
+    
+    // Crypto status
+    const isEcc = state.wallets && state.wallets.Alice && state.wallets.Alice.is_ecc;
+    cryptoEl.textContent = isEcc ? 'ECC' : 'RSA';
+    cryptoEl.className = `defense-badge ${isEcc ? 'active' : 'inactive'}`;
+    
+    // CBL status
+    const cblActive = mode === 'CBL' || mode === 'STAKE_CBL' || mode === 'ZK_STAKE_CBL' || mode === 'HYBRID';
+    cblEl.textContent = cblActive ? 'ON' : 'OFF';
+    cblEl.className = `defense-badge ${cblActive ? 'active' : 'inactive'}`;
+    
+    // ZK Stake status
+    const zkActive = mode === 'ZK_STAKE_CBL';
+    zkEl.textContent = zkActive ? 'ON' : 'OFF';
+    zkEl.className = `defense-badge ${zkActive ? 'active' : 'inactive'}`;
+    
+    // 51% acquisition method
+    if (state.hash_power_distribution && state.hash_power_distribution.Eve >= 51) {
+        hashMethodEl.textContent = 'Cloud Mining';
+        hashMethodEl.className = 'defense-badge inactive';
+    } else {
+        hashMethodEl.textContent = '-';
+        hashMethodEl.className = 'defense-badge inactive';
+    }
 }
 
 // API Calls
@@ -448,9 +661,9 @@ async function enableCBL() {
     }
 }
 
-async function enableStakeCBL() {
+async function enableZKStake() {
     try {
-        const response = await fetch(`${API_BASE}/api/enable_stake_cbl`, {
+        const response = await fetch(`${API_BASE}/api/enable_zk_stake`, {
             method: 'POST'
         });
         const result = await response.json();
@@ -459,7 +672,120 @@ async function enableStakeCBL() {
         }
     } catch (error) {
         console.error('Error:', error);
-        alert('Error enabling Stake-CBL');
+        alert('Error enabling ZK Stake-CBL');
+    }
+}
+
+async function enableECC() {
+    try {
+        const response = await fetch(`${API_BASE}/api/enable_ecc`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error enabling ECC');
+    }
+}
+
+async function enableZKCBL() {
+    try {
+        const response = await fetch(`${API_BASE}/api/enable_zk_cbl`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error enabling ZK Stake-CBL network');
+    }
+}
+
+async function mineMultipleAttack() {
+    try {
+        const response = await fetch(`${API_BASE}/api/mine_multiple_attack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ count: 3 })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error mining multiple blocks');
+    }
+}
+
+async function mineMultipleHonest() {
+    try {
+        const response = await fetch(`${API_BASE}/api/mine_multiple_honest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ count: 2 })
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error mining multiple honest blocks');
+    }
+}
+
+async function enableSybil() {
+    try {
+        const response = await fetch(`${API_BASE}/api/enable_sybil`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        } else {
+            alert('Sybil attack enabled! Eve_A and Eve_B identities created.');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error enabling Sybil attack');
+    }
+}
+
+async function enableHybrid() {
+    try {
+        const response = await fetch(`${API_BASE}/api/enable_hybrid`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (!result.success) {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error enabling Hybrid defense');
+    }
+}
+
+async function upgradeNetwork() {
+    try {
+        const response = await fetch(`${API_BASE}/api/upgrade_network`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+        if (result.success) {
+            alert(`Network upgraded: ${result.old_mode} → ${result.new_mode}`);
+        } else {
+            alert(result.message);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Error upgrading network');
     }
 }
 

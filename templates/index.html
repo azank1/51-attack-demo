@@ -21,12 +21,14 @@
         <div class="main-grid">
             <!-- Left Panel: Attacker Controls -->
             <div class="panel attacker-panel">
-                <h2>🎯 Attacker Control Panel (Eve)</h2>
+                <h2>🎯 Attacker (Eve)</h2>
                 <div class="button-group">
-                    <button id="btn-crack-rsa" class="btn btn-danger">1. Crack RSA Key</button>
-                    <button id="btn-acquire-hash" class="btn btn-warning">2. Acquire 51% Hash Power</button>
-                    <button id="btn-mine-block" class="btn btn-warning">3. Mine Attack Block</button>
-                    <button id="btn-broadcast" class="btn btn-danger">4. Broadcast Chain</button>
+                    <button id="btn-crack-rsa" class="btn btn-danger">Crack RSA Key</button>
+                    <button id="btn-acquire-hash" class="btn btn-warning">Acquire 51% Hash</button>
+                    <button id="btn-mine-block" class="btn btn-warning">Mine Attack Block</button>
+                    <button id="btn-mine-multiple" class="btn btn-warning">Mine 3 Blocks</button>
+                    <button id="btn-enable-sybil" class="btn btn-warning" style="display: none;">Enable Sybil</button>
+                    <button id="btn-broadcast" class="btn btn-danger">Broadcast Chain</button>
                 </div>
                 <div class="status-box">
                     <h3>Attack Status</h3>
@@ -42,17 +44,22 @@
                         <span>Attack Blocks:</span>
                         <span id="attack-blocks" class="status-badge">0</span>
                     </div>
+                    <div class="status-item sybil-active" id="sybil-status-item" style="display: none;">
+                        <span>Sybil:</span>
+                        <span id="sybil-status" class="status-badge">INACTIVE</span>
+                    </div>
                 </div>
             </div>
 
             <!-- Center: Blockchain Visualization -->
             <div class="panel blockchain-panel">
-                <h2>⛓️ Blockchain Visualization</h2>
+                <h2>⛓️ Blockchain</h2>
                 <div id="blockchain-visualization"></div>
                 <div class="legend">
-                    <span class="legend-item"><span class="legend-color honest"></span> Honest Chain (Mainnet)</span>
-                    <span class="legend-item"><span class="legend-color attack"></span> Attack Chain (Fork)</span>
-                    <span class="legend-item"><span class="legend-color genesis"></span> Genesis Block</span>
+                    <span class="legend-item"><span class="legend-color honest"></span> Honest</span>
+                    <span class="legend-item"><span class="legend-color attack"></span> Attack</span>
+                    <span class="legend-item"><span class="legend-color" style="background: #9c27b0;"></span> Sybil</span>
+                    <span class="legend-item"><span class="legend-color genesis"></span> Genesis</span>
                 </div>
             </div>
 
@@ -60,54 +67,46 @@
             <div class="panel defense-panel">
                 <h2>🛡️ Network Defense</h2>
                 <div class="button-group">
-                    <button id="btn-mine-honest" class="btn btn-info">Mine Honest Block</button>
-                    <button id="btn-enable-cbl" class="btn btn-success">Enable CBL (Basic)</button>
-                    <button id="btn-enable-stake" class="btn btn-primary">Enable ECC + Stake-CBL</button>
+                    <button id="btn-mine-honest" class="btn btn-info">Mine Honest</button>
+                    <button id="btn-enable-cbl" class="btn btn-success">Enable CBL</button>
+                    <button id="btn-enable-zk-stake" class="btn btn-primary">Enable ZK Stake-CBL</button>
+                    <button id="btn-enable-ecc" class="btn btn-primary">Enable ECC</button>
+                    <button id="btn-enable-zk-cbl" class="btn btn-primary">Enable ZK Stake-CBL</button>
                     <button id="btn-reset" class="btn btn-secondary">Reset</button>
                 </div>
                 <div class="defense-status">
-                    <h3>Protocol Mode</h3>
+                    <h3>Defense State</h3>
                     <div class="defense-item">
-                        <span>Current Mode:</span>
+                        <span>Mode:</span>
                         <span id="defense-mode" class="defense-badge inactive">LEGACY</span>
                     </div>
                     <div class="defense-item">
-                        <span>Cryptography:</span>
-                        <span id="crypto-status" class="defense-badge inactive">RSA (Weak)</span>
+                        <span>Crypto:</span>
+                        <span id="crypto-status" class="defense-badge inactive">RSA</span>
                     </div>
                     <div class="defense-item">
-                        <span>CBL Basic:</span>
-                        <span id="cbl-status" class="defense-badge inactive">INACTIVE</span>
+                        <span>CBL:</span>
+                        <span id="cbl-status" class="defense-badge inactive">OFF</span>
                     </div>
                     <div class="defense-item">
-                        <span>Stake-CBL:</span>
-                        <span id="stake-status" class="defense-badge inactive">INACTIVE</span>
+                        <span>ZK Stake:</span>
+                        <span id="zk-status" class="defense-badge inactive">OFF</span>
+                    </div>
+                    <div class="defense-item">
+                        <span>51% Method:</span>
+                        <span id="hash-method" class="defense-badge inactive">-</span>
                     </div>
                 </div>
-            </div>
-
-            <!-- Code Execution Flow Panel -->
-            <div class="panel code-flow-panel">
-                <h2>🔍 Code Execution Flow</h2>
-                <div class="execution-controls">
-                    <button id="btn-expand-details" class="btn-small">Toggle Details</button>
-                    <button id="btn-clear-flow" class="btn-small">Clear Flow</button>
-                </div>
-                <div id="code-flow-visualization"></div>
-                <div id="function-stack" class="function-stack"></div>
             </div>
         </div>
 
-        <!-- Bottom: Wallet Balances and Logs -->
-        <div class="bottom-grid">
-            <div class="panel wallet-panel">
-                <h2>💰 Wallet Balances</h2>
-                <div id="wallet-balances"></div>
+        <!-- Terminal/Log Panel at Bottom -->
+        <div class="panel terminal-panel">
+            <div class="terminal-header">
+                <h2>🔍 Execution Log & Code Logic</h2>
+                <button id="btn-clear-terminal" class="btn-small">Clear</button>
             </div>
-            <div class="panel log-panel">
-                <h2>📋 Network Console</h2>
-                <div id="logs" class="logs"></div>
-            </div>
+            <div id="terminal-output" class="terminal-output"></div>
         </div>
     </div>
 

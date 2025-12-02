@@ -25,9 +25,9 @@ An attacker (Eve) with majority hash power can:
 3. **Double spend** - Broadcast the longer chain to reverse transactions
 
 ### Attack Sequence
-1. **Crack RSA Key** → Factor Alice's public key (n=3233) to get private key
-2. **Launch 51% Attack** → Mine 3 consecutive blocks with fraudulent transaction
-3. **Broadcast** → If chain is longer, network accepts it (vulnerability)
+**Note**: You can perform attacks in any order! Key cracking is optional.
+- **Option A (Realistic 51% Attack)**: Acquire 51% hash power → Mine blocks with your own coins → Broadcast
+- **Option B (Combined Attack)**: Crack RSA Key → Acquire 51% hash power → Mine blocks with stolen coins → Broadcast
 
 ## Understanding the Defense
 
@@ -58,11 +58,108 @@ An attacker (Eve) with majority hash power can:
 - **Blockchain Visualization**: Interactive graph showing honest (blue) and attack (red) chains
 - **Genesis Block**: Highlighted with special border
 
-### Demo Flow
+## Demo Scenarios
+
+### Scenario 1: Bitcoin Vulnerability (LEGACY Mode)
+**Goal**: Demonstrate how a basic 51% attack succeeds on unprotected Bitcoin
+
+**Steps**:
+1. **Acquire 51% Hash Power** → Click "Acquire 51% Hash" (rents from cloud mining)
+2. **Mine Attack Blocks** → Click "Mine 3 Blocks" (uses Eve's own coins - no key cracking needed!)
+3. **Broadcast Chain** → Click "Broadcast Chain"
+
+**Result**: ✅ Attack succeeds (demonstrates vulnerability)
+
+**Explain**: "This shows how 51% attacks work on unprotected Bitcoin. Eve doesn't need to crack keys - she can double-spend her own coins using majority hash power."
+
+**Optional**: You can also crack Alice's key first to demonstrate theft attack, but it's not required.
+
+---
+
+### Scenario 2: CBL Defense Blocks Attack
+**Goal**: Show how Consecutive Block Limit (CBL) prevents 51% attacks
+
+**Steps**:
+1. **Enable CBL Defense** → Click "Enable CBL"
+2. **Acquire 51% Hash Power** → Click "Acquire 51% Hash"
+3. **Mine 3 Blocks** → Click "Mine 3 Blocks" (all consecutive blocks by Eve)
+4. **Broadcast Chain** → Click "Broadcast Chain"
+
+**Result**: ❌ Attack blocked (CBL prevents consecutive mining)
+
+**Explain**: "CBL catches the attack by limiting consecutive blocks. Eve mined 3 consecutive blocks, which violates the limit of 2."
+
+---
+
+### Scenario 3: Sybil Attack Bypasses CBL
+**Goal**: Show how attackers bypass CBL using multiple identities
+
+**Steps**:
+1. **Ensure CBL is Enabled** (from Scenario 2)
+2. **Enable Sybil Attack** → Click "Enable Sybil" (creates Eve_A and Eve_B)
+3. **Acquire 51% Hash Power** → Click "Acquire 51% Hash"
+4. **Mine 3 Blocks** → Click "Mine 3 Blocks" (blocks appear in purple - alternating miners)
+5. **Broadcast Chain** → Click "Broadcast Chain"
+
+**Result**: ✅ Attack succeeds (Sybil bypasses CBL)
+
+**Explain**: "Multiple identities bypass CBL by alternating miners. Notice the purple blocks - Eve_A, Eve_B, Eve_A. Since they're different miners, CBL doesn't catch it."
+
+---
+
+### Scenario 4: ZK Stake-CBL Defense
+**Goal**: Show how Zero Knowledge stake validation prevents Sybil attacks
+
+**Steps**:
+1. **Enable ZK Stake-CBL** → Click "Enable ZK Stake-CBL"
+2. **Acquire 51% Hash Power** → Click "Acquire 51% Hash"
+3. **Mine 3 Blocks** → Click "Mine 3 Blocks" (with Sybil still active)
+4. **Broadcast Chain** → Click "Broadcast Chain"
+
+**Result**: ❌ Attack blocked (ZK stake prevents Sybil)
+
+**Explain**: "ZK stake validates without revealing amounts or identities. Even with Sybil, Eve's total stake is low compared to honest miners + whale backing. The attack is rejected and Eve's stake is slashed."
+
+---
+
+### Scenario 5: ECC Upgrade
+**Goal**: Show how ECC prevents key cracking
+
+**Steps**:
+1. **Enable ECC** → Click "Enable ECC"
+2. **Try to Crack Key** → Click "Crack RSA Key"
+
+**Result**: ❌ Key cracking fails (ECC is secure)
+
+**Explain**: "ECC prevents key theft unlike weak RSA. There's no known efficient algorithm to break ECC cryptography."
+
+---
+
+### Scenario 6: Complete Defense
+**Goal**: Show comprehensive defense combining all mechanisms
+
+**Steps**:
+1. **Enable Complete Defense** → Click "Enable ZK Stake-CBL" (combines ZK stake + ECC + CBL)
+2. **Try All Attacks** → Try each attack button - all should fail:
+   - Crack RSA Key → Fails (ECC)
+   - Mine 3 Blocks → Fails (CBL)
+   - Broadcast Chain → Fails (ZK Stake)
+
+**Result**: ❌ All attacks blocked
+
+**Explain**: "Comprehensive defense combining ECC (prevents key cracking), CBL (prevents consecutive mining), and ZK Stake (prevents Sybil attacks while protecting privacy)."
+
+---
+
+## Demo Flow Summary
+
 1. **Start**: Network is vulnerable (no defenses)
-2. **Attack**: Click "Crack RSA" → "51% Attack" → Attack succeeds
-3. **Basic Defense**: Click "Enable CBL" → Try attack again → 51% blocked, but Sybil works
-4. **Full Defense**: Click "Enable ECC + Stake" → Try "Sybil Attack" → Blocked with slashing
+2. **Scenario 1**: Basic 51% attack succeeds (no key cracking needed!)
+3. **Scenario 2**: Enable CBL → Attack blocked
+4. **Scenario 3**: Enable Sybil → Attack succeeds (bypasses CBL)
+5. **Scenario 4**: Enable ZK Stake-CBL → Attack blocked
+6. **Scenario 5**: Enable ECC → Key cracking fails
+7. **Scenario 6**: Complete defense → All attacks blocked
 
 ## Key Concepts
 

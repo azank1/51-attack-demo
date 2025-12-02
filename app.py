@@ -280,7 +280,7 @@ class ExecutionTracker:
     def to_dict(self):
         """Convert to dictionary for JSON response"""
         return {
-            'steps': self.steps[-50:],  # Last 50 steps
+            'steps': self.steps[-100:],  # Last 100 steps for terminal display
             'current_function': self.current_function,
             'call_stack': self.call_stack.copy(),
             'proof_events': self.proof_events.to_dict()
@@ -377,9 +377,163 @@ class ConsensusEngine:
         return total_stake
     
     @staticmethod
+    def check_zk_stake_weight(chain: List[Block], zk_stake_proofs: Dict[str, int]) -> int:
+        """
+        Zero Knowledge Stake Weight Check
+        Validates chain weight using ZK proofs without revealing:
+        - Actual stake amounts
+        - Identity of stake holders (whales)
+        Returns: Total validated stake weight (ZK proof verified)
+        """
+        total_zk_weight = 0
+        for block in chain[1:]:  # Skip genesis
+            miner = block.miner
+            # Get ZK proof for this miner (doesn't reveal actual stake)
+            zk_proof = zk_stake_proofs.get(miner, 0)
+            # ZK proof validates stake exists without revealing amount/identity
+            if zk_proof > 0:
+                total_zk_weight += zk_proof
+            # Handle Sybil identities
+            elif miner.startswith("Eve_"):
+                # Even with Sybil, ZK proofs aggregate correctly
+                zk_proof = zk_stake_proofs.get("Eve", 0) // 2
+                total_zk_weight += zk_proof
+        return total_zk_weight
+    
+    @staticmethod
+    def check_rate_limit(chain: List[Block], max_blocks_per_hour: int = 10, 
+                        miner_blocks: Optional[Dict[str, List[float]]] = None) -> Tuple[bool, str]:
+        """Check time-based rate limiting - no miner can mine more than N blocks per hour"""
+        if len(chain) <= 1:
+            return True, ""
+        
+        if miner_blocks is None:
+            miner_blocks = {}
+        
+        current_time = time.time()
+        hour_ago = current_time - 3600  # 1 hour in seconds
+        
+        # Count blocks per miner in the last hour
+        for block in chain[1:]:  # Skip genesis
+            miner = block.miner
+            if miner not in miner_blocks:
+                miner_blocks[miner] = []
+            
+            # Add this block's timestamp
+            miner_blocks[miner].append(block.timestamp)
+            
+            # Filter to only blocks in the last hour
+            recent_blocks = [ts for ts in miner_blocks[miner] if ts >= hour_ago]
+            
+            if len(recent_blocks) > max_blocks_per_hour:
+                return False, f"Rate limit violation: {miner} mined {len(recent_blocks)} blocks in the last hour (limit: {max_blocks_per_hour})"
+        
+        return True, ""
+    
+    @staticmethod
+    def validate_chain_hybrid(attack_chain: List[Block], honest_chain: List[Block],
+                              defense_mode: str, wallets: Dict[str, Wallet],
+                              miner_blocks: Optional[Dict[str, List[float]]] = None,
+                              execution_tracker: Optional['ExecutionTracker'] = None) -> Tuple[bool, str, List[str]]:
+        """
+        Hybrid validation combining all security checks:
+        1. PoW Validation (Bitcoin's core)
+        2. Transaction Validation
+        3. CBL Check (Consecutive Block Limit)
+        4. Stake Weight Check (Economic Security)
+        5. Time-based Rate Limit
+        6. Chain Length (Nakamoto Consensus)
+        """
+        if execution_tracker:
+            execution_tracker.push_function("ConsensusEngine.validate_chain_hybrid")
+            execution_tracker.add_step("Hybrid Validation", "checking", 
+                                     f"Applying all security checks: PoW, TX, CBL, Stake, Rate Limit, Length")
+        
+        slashed_miners = []
+        
+        # 1. PoW Validation
+        pow_valid, pow_reason = ConsensusEngine.validate_pow(attack_chain)
+        if not pow_valid:
+            if execution_tracker:
+                execution_tracker.add_step("PoW Check", "failed", pow_reason)
+                execution_tracker.pop_function()
+            return False, f"PoW violation: {pow_reason}", slashed_miners
+        
+        # 2. Transaction Validation
+        tx_valid, tx_reason = ConsensusEngine.validate_transactions(attack_chain, wallets)
+        if not tx_valid:
+            if execution_tracker:
+                execution_tracker.add_step("Transaction Check", "failed", tx_reason)
+                execution_tracker.pop_function()
+            return False, f"Transaction violation: {tx_reason}", slashed_miners
+        
+        # 3. CBL Check
+        cbl_valid, cbl_reason = ConsensusEngine.check_static_cbl(attack_chain, max_consecutive=2)
+        if not cbl_valid:
+            if execution_tracker:
+                execution_tracker.add_step("CBL Check", "failed", cbl_reason)
+                execution_tracker.pop_function()
+            return False, f"CBL violation: {cbl_reason}", slashed_miners
+        
+        # 4. Stake Weight Check
+        honest_weight = ConsensusEngine.check_stake_weight(honest_chain, wallets)
+        attack_weight = ConsensusEngine.check_stake_weight(attack_chain, wallets)
+        
+        # Add stakeholder backing
+        alice_stake = wallets.get('Alice', Wallet("Alice", 0, 0)).stake
+        bob_stake = wallets.get('Bob', Wallet("Bob", 0, 0)).stake
+        honest_backing = alice_stake + bob_stake
+        honest_weight += honest_backing
+        
+        if attack_weight < honest_weight:
+            # Slash attacker
+            for block in attack_chain[1:]:
+                miner = block.miner
+                if miner.startswith("Eve") and miner not in slashed_miners:
+                    slashed_miners.append(miner)
+                    if miner == "Eve":
+                        wallets["Eve"].stake = max(0, wallets["Eve"].stake - 50)
+                    elif miner.startswith("Eve_"):
+                        wallets["Eve"].stake = max(0, wallets["Eve"].stake - 25)
+            
+            if execution_tracker:
+                execution_tracker.add_step("Stake Weight Check", "failed", 
+                                         f"Insufficient stake: Attack={attack_weight} < Honest={honest_weight}")
+                execution_tracker.pop_function()
+            return False, f"Insufficient stake weight: Attack={attack_weight}, Honest={honest_weight}", slashed_miners
+        
+        # 5. Time-based Rate Limit
+        rate_valid, rate_reason = ConsensusEngine.check_rate_limit(attack_chain, 
+                                                                    max_blocks_per_hour=10,
+                                                                    miner_blocks=miner_blocks)
+        if not rate_valid:
+            if execution_tracker:
+                execution_tracker.add_step("Rate Limit Check", "failed", rate_reason)
+                execution_tracker.pop_function()
+            return False, f"Rate limit violation: {rate_reason}", slashed_miners
+        
+        # 6. Chain Length Check
+        if len(attack_chain) <= len(honest_chain):
+            if execution_tracker:
+                execution_tracker.add_step("Chain Length Check", "failed", 
+                                         f"Attack chain too short: {len(attack_chain)} <= {len(honest_chain)}")
+                execution_tracker.pop_function()
+            return False, f"Attack chain too short: {len(attack_chain)} <= {len(honest_chain)}", slashed_miners
+        
+        # All checks passed
+        if execution_tracker:
+            execution_tracker.add_step("Hybrid Validation", "passed", 
+                                     "All security checks passed: PoW ✓, TX ✓, CBL ✓, Stake ✓, Rate Limit ✓, Length ✓")
+            execution_tracker.pop_function()
+        return True, "All security checks passed", slashed_miners
+    
+    @staticmethod
     def validate_fork(attack_chain: List[Block], honest_chain: List[Block],
                      defense_mode: str, wallets: Dict[str, Wallet], 
-                     execution_tracker: Optional['ExecutionTracker'] = None) -> Tuple[bool, str, List[str]]:
+                     execution_tracker: Optional['ExecutionTracker'] = None,
+                     miner_blocks: Optional[Dict[str, List[float]]] = None,
+                     miner_reputation: Optional[Dict[str, int]] = None,
+                     state: Optional['SimulationState'] = None) -> Tuple[bool, str, List[str]]:
         """
         Validate attack chain against honest chain
         Returns: (is_valid, reason, slashed_miners)
@@ -457,6 +611,13 @@ class ConsensusEngine:
                 execution_tracker.add_step("Result: REJECTED", "failed", "Attack chain too short")
                 execution_tracker.pop_function()
             return False, "Attack chain too short", slashed_miners
+        
+        elif defense_mode == "ZK_STAKE_CBL":
+            # ZK Stake validation - need to get state for zk_stake_proofs
+            state = None
+            # Try to get state from context or pass it differently
+            # For now, we'll handle it in the calling function
+            pass  # Handled above
         
         elif defense_mode == "CBL":
             # Level 2: Static CBL
@@ -543,8 +704,155 @@ class ConsensusEngine:
                     code_snippet="class ConsensusEngine:\n    @staticmethod\n    def check_stake_weight(chain, wallets):\n        weight = sum(wallets[block.miner].stake\n                     for block in chain)\n        return weight",
                     security_context="OOP: ConsensusEngine.check_stake_weight() - stake-weighted consensus"
                 )
+        
+        elif defense_mode == "HYBRID":
+            # Level 4: Hybrid Defense - All checks combined
+            if execution_tracker:
+                execution_tracker.add_step(
+                    "Defense Mode: HYBRID", 
+                    "checking", 
+                    "Applying all security checks: PoW, TX, CBL, Stake, Rate Limit, Length",
+                    code_snippet="def validate_chain_hybrid(chain):\n    # 1. PoW\n    # 2. Transactions\n    # 3. CBL\n    # 4. Stake Weight\n    # 5. Rate Limit\n    # 6. Chain Length",
+                    security_context="OOP: ConsensusEngine.validate_chain_hybrid() - comprehensive security"
+                )
+            # Use hybrid validation
+            is_valid, reason, slashed = ConsensusEngine.validate_chain_hybrid(
+                attack_chain, honest_chain, defense_mode, wallets,
+                miner_blocks=miner_blocks,
+                execution_tracker=execution_tracker
+            )
+            if is_valid:
+                if execution_tracker:
+                    execution_tracker.add_step("Result: ACCEPTED", "passed", reason)
+                    execution_tracker.pop_function()
+                return True, reason, slashed
+            else:
+                if execution_tracker:
+                    execution_tracker.add_step("Result: REJECTED", "failed", reason)
+                    execution_tracker.pop_function()
+                return False, reason, slashed
+        
+        elif defense_mode == "ZK_STAKE_CBL":
+            # Level 3: Zero Knowledge Stake-Weighted CBL
+            # Validates stake without revealing amounts or identities (whales hidden)
+            if execution_tracker:
+                execution_tracker.add_step(
+                    "Defense Mode: ZK_STAKE_CBL", 
+                    "checking", 
+                    "Zero Knowledge stake validation (stake amounts & identities hidden)",
+                    code_snippet="class ConsensusEngine:\n    @staticmethod\n    def check_zk_stake_weight(chain, zk_proofs):\n        # ZK proofs validate stake without revealing:\n        # - Actual stake amounts\n        # - Identity of stake holders (whales)\n        return sum(zk_proofs[m] for m in miners)",
+                    security_context="OOP: ConsensusEngine.check_zk_stake_weight() - ZK stake validation"
+                )
+            # Get ZK stake proofs from state (doesn't reveal actual stakes)
+            zk_stake_proofs = {}
+            zk_whale_backing = 0
+            if state:
+                zk_stake_proofs = getattr(state, 'zk_stake_proofs', {})
+                zk_whale_backing = getattr(state, 'zk_whale_backing', 0)
+            
+            if not zk_stake_proofs:
+                # Initialize ZK proofs (simulated - in real ZK, these are cryptographic proofs)
+                zk_stake_proofs = {
+                    "Miner1": 5000,  # ZK proof value (not actual stake)
+                    "Alice": 5000,
+                    "Bob": 5000,
+                    "Eve": 200,
+                }
+                if state:
+                    state.zk_stake_proofs = zk_stake_proofs
+            
+            if zk_whale_backing == 0:
+                zk_whale_backing = 10000  # Hidden whale stake
+                if state:
+                    state.zk_whale_backing = zk_whale_backing
+            
+            # Calculate ZK stake weight (doesn't reveal actual amounts)
+            honest_chain_list = honest_chain.chain if hasattr(honest_chain, 'chain') else honest_chain
+            honest_weight = ConsensusEngine.check_zk_stake_weight(honest_chain_list, zk_stake_proofs)
+            attack_weight = ConsensusEngine.check_zk_stake_weight(attack_chain, zk_stake_proofs)
+            
+            # Add hidden whale backing (ZK proof - doesn't reveal identity or amount)
+            honest_weight += zk_whale_backing
+            
+            if execution_tracker:
+                execution_tracker.add_step(
+                    "Calculate ZK Stake Weight", 
+                    "checking", 
+                    f"Attack ZK weight: {attack_weight}, Honest ZK weight: {honest_weight} (whale backing hidden)",
+                    code_snippet="honest_weight = zk_miner_proofs + zk_whale_backing\nattack_weight = zk_attack_proofs\nif attack_weight < honest_weight:\n    return False  # ZK validation failed",
+                    security_context="Consensus: ZK stake validation (privacy-preserving)"
+                )
+            
+            if attack_weight < honest_weight:
+                # Attack chain has insufficient ZK stake weight - REJECT and SLASH
+                if execution_tracker:
+                    execution_tracker.add_step(
+                        "Compare ZK Stake Weight", 
+                        "failed", 
+                        f"Attack ({attack_weight}) < Honest ({honest_weight}) - ZK proof validation failed",
+                        code_snippet="if attack_weight < honest_weight:\n    # ZK proof shows insufficient stake\n    slash_attacker_stake()\n    return False",
+                        security_context="Security: ZK stake validation prevents attack (whales protected)"
+                    )
+                    execution_tracker.add_step(
+                        "Slash Attacker", 
+                        "checking", 
+                        "Applying stake slashing penalty",
+                        code_snippet="wallet.stake = max(0, wallet.stake - penalty)\n# Economic punishment for attack",
+                        security_context="Defense: Slashing mechanism deters attacks"
+                    )
+                # Slash attacker's stake
+                for block in attack_chain[1:]:
+                    miner = block.miner
+                    if miner.startswith("Eve") and miner not in slashed_miners:
+                        slashed_miners.append(miner)
+                        if miner == "Eve":
+                            wallets["Eve"].stake = max(0, wallets["Eve"].stake - 50)
+                        elif miner.startswith("Eve_"):
+                            wallets["Eve"].stake = max(0, wallets["Eve"].stake - 25)
+                if execution_tracker:
+                    execution_tracker.add_step(
+                        "Slash Attacker", 
+                        "passed", 
+                        f"Slashed: {', '.join(slashed_miners)}, Eve's new stake: {wallets['Eve'].stake}",
+                        code_snippet="# Attacker penalized\nreturn False",
+                        security_context="Security: Attack deterred through economic penalty"
+                    )
+                    execution_tracker.add_step(
+                        "Result: REJECTED", 
+                        "failed", 
+                        f"Insufficient ZK stake weight: Attack={attack_weight} < Honest={honest_weight} (ZK whale backing hidden)")
+                    execution_tracker.pop_function()
+                return False, f"Insufficient ZK stake weight: Attack={attack_weight}, Honest={honest_weight} (ZK whale backing hidden)", slashed_miners
+            
+            # Attack has sufficient ZK stake weight - ACCEPT
+            if execution_tracker:
+                execution_tracker.add_step(
+                    "Compare ZK Stake Weight", 
+                    "passed", 
+                    f"Attack ({attack_weight}) >= Honest ({honest_weight}) - ZK validation passed",
+                    code_snippet="return True  # ZK stake validation passed",
+                    security_context="Consensus: ZK stake weight sufficient"
+                )
+                execution_tracker.add_step(
+                    "Result: ACCEPTED", 
+                    "passed", 
+                    f"ZK stake weight sufficient: Attack={attack_weight} >= Honest={honest_weight}")
+                execution_tracker.pop_function()
+            return True, f"Attack chain accepted by ZK stake weight: Attack={attack_weight} >= Honest={honest_weight}", slashed_miners
+        
+        elif defense_mode == "STAKE_CBL":
+            # Level 3: Stake-Weighted CBL (transparent)
+            if execution_tracker:
+                execution_tracker.add_step(
+                    "Defense Mode: STAKE_CBL", 
+                    "checking", 
+                    "Comparing economic weight (stake-weighted validation)",
+                    code_snippet="class ConsensusEngine:\n    @staticmethod\n    def check_stake_weight(chain, wallets):\n        weight = sum(wallets[block.miner].stake\n                     for block in chain)\n        return weight",
+                    security_context="OOP: ConsensusEngine.check_stake_weight() - stake-weighted consensus"
+                )
             # Calculate stake weight of honest chain (miners who mined blocks)
-            honest_weight = ConsensusEngine.check_stake_weight(honest_chain, wallets)
+            honest_chain_list = honest_chain.chain if hasattr(honest_chain, 'chain') else honest_chain
+            honest_weight = ConsensusEngine.check_stake_weight(honest_chain_list, wallets)
             attack_weight = ConsensusEngine.check_stake_weight(attack_chain, wallets)
             
             # Add honest stakeholder backing (Alice + Bob validate honest chain)
@@ -566,13 +874,22 @@ class ConsensusEngine:
             if attack_weight < honest_weight:
                 # Attack chain has insufficient economic weight - REJECT and SLASH
                 if execution_tracker:
-                    execution_tracker.add_step(
-                        "Compare Economic Weight", 
-                        "failed", 
-                        f"Attack ({attack_weight}) < Honest ({honest_weight}) - Attack rejected and slashed",
-                        code_snippet="if attack_weight < honest_weight:\n    slash_attacker_stake()\n    return False",
-                        security_context="Security: Insufficient economic weight - slash attacker"
-                    )
+                    if defense_mode == "ZK_STAKE_CBL":
+                        execution_tracker.add_step(
+                            "Compare ZK Stake Weight", 
+                            "failed", 
+                            f"Attack ({attack_weight}) < Honest ({honest_weight}) - ZK proof validation failed",
+                            code_snippet="if attack_weight < honest_weight:\n    # ZK proof shows insufficient stake\n    slash_attacker_stake()\n    return False",
+                            security_context="Security: ZK stake validation prevents attack (whales protected)"
+                        )
+                    else:
+                        execution_tracker.add_step(
+                            "Compare Economic Weight", 
+                            "failed", 
+                            f"Attack ({attack_weight}) < Honest ({honest_weight}) - Attack rejected and slashed",
+                            code_snippet="if attack_weight < honest_weight:\n    slash_attacker_stake()\n    return False",
+                            security_context="Security: Insufficient economic weight - slash attacker"
+                        )
                     execution_tracker.add_step(
                         "Slash Attacker", 
                         "checking", 
@@ -602,7 +919,10 @@ class ConsensusEngine:
                         "failed", 
                         f"Insufficient stake weight: Attack={attack_weight} < Honest={honest_weight}")
                     execution_tracker.pop_function()
-                return False, f"Insufficient stake weight: Attack={attack_weight}, Honest={honest_weight} (including {honest_backing} stakeholder backing)", slashed_miners
+                if defense_mode == "ZK_STAKE_CBL":
+                    return False, f"Insufficient ZK stake weight: Attack={attack_weight}, Honest={honest_weight} (ZK whale backing hidden)", slashed_miners
+                else:
+                    return False, f"Insufficient stake weight: Attack={attack_weight}, Honest={honest_weight} (including {honest_backing} stakeholder backing)", slashed_miners
             
             # Attack has sufficient economic weight - ACCEPT
             if execution_tracker:
@@ -653,7 +973,7 @@ class SimulationState:
         self.honest_chain.add_block("Miner1", [alice_to_bob_tx])
         
         self.attack_chain = []
-        self.defense_mode = "LEGACY"  # LEGACY, CBL, STAKE_CBL
+        self.defense_mode = "LEGACY"  # LEGACY, CBL, ZK_STAKE_CBL, ECC, ZK_CBL
         self.alice_cracked = False
         self.use_sybil = False  # Flag to indicate Sybil attack (Scenario 3)
         self.execution_tracker = ExecutionTracker()
@@ -665,6 +985,16 @@ class SimulationState:
         # Proof event tracking
         self.last_t1_confirmation_height = 6  # Initial honest chain height where T1 confirmed
         self.t2_tx_id = None  # Track the double-spend transaction ID
+        
+        # Enhanced features for hybrid mode
+        self.miner_blocks = {}  # Track blocks mined by each miner (for rate limiting)
+        self.miner_reputation = {}  # Track reputation scores for miners
+        self.checkpoints = []  # List of checkpoint block heights
+        
+        # Zero Knowledge Stake proofs (doesn't reveal actual stake amounts or identities)
+        # Format: {miner: zk_proof_value} where zk_proof_value is validated but doesn't reveal stake
+        self.zk_stake_proofs = {}  # ZK proofs for stake validation
+        self.zk_whale_backing = 0  # Hidden whale backing (not revealed)
         
         self.logs = [
             "=== BLOCKCHAIN 51% ATTACK SIMULATION ===",
@@ -714,6 +1044,17 @@ class SimulationState:
         """Mine a block on the honest chain (for testing honest chain growth)"""
         # Create empty block for honest miners
         new_block = self.honest_chain.add_block(miner_name, [])
+        
+        # Track block for rate limiting
+        if miner_name not in self.miner_blocks:
+            self.miner_blocks[miner_name] = []
+        self.miner_blocks[miner_name].append(new_block.timestamp)
+        
+        # Update reputation (honest mining increases reputation)
+        if miner_name not in self.miner_reputation:
+            self.miner_reputation[miner_name] = 100  # Start with 100
+        self.miner_reputation[miner_name] = min(100, self.miner_reputation[miner_name] + 1)
+        
         return new_block
     
     def check_proof_events(self):
@@ -792,7 +1133,10 @@ class SimulationState:
             self.honest_chain.chain,
             self.defense_mode,
             self.wallets,
-            self.execution_tracker
+            self.execution_tracker,
+            self.miner_blocks,
+            self.miner_reputation,
+            self  # Pass state for ZK stake proofs
         )
         
         if is_valid:
@@ -902,7 +1246,10 @@ class SimulationState:
             'hash_power': self.hash_power_distribution,
             'execution_tracker': self.execution_tracker.to_dict(),
             'proof_events': self.execution_tracker.proof_events.to_dict(),
-            'logs': self.logs[-30:]  # Last 30 logs
+            'logs': self.logs[-30:],  # Last 30 logs
+            'miner_blocks': {k: len(v) for k, v in self.miner_blocks.items()},  # Count of blocks per miner
+            'miner_reputation': self.miner_reputation.copy(),
+            'checkpoints': self.checkpoints.copy()
         }
 
 # Global simulation state
@@ -974,9 +1321,16 @@ def mine_honest_block():
 
 @app.route('/api/crack_rsa', methods=['POST'])
 def crack_rsa():
-    """Scenario 1 Step 1: Crack Alice's RSA key"""
+    """Scenario 1 Step 1: Crack Alice's RSA key - Shows realistic RSA factorization"""
     sim_state.execution_tracker.clear()
     sim_state.execution_tracker.push_function("crack_rsa")
+    sim_state.execution_tracker.add_step(
+        "RSA Key Cracking Process", 
+        "checking", 
+        "Starting RSA key factorization attack",
+        code_snippet="# Real-world RSA cracking process\n# 1. Extract public key from blockchain\n# 2. Factor modulus n = p * q\n# 3. Calculate private key d",
+        security_context="Attack: Cryptographic key theft"
+    )
     sim_state.execution_tracker.add_step(
         "Start RSA Cracking", 
         "checking", 
@@ -1019,23 +1373,48 @@ def crack_rsa():
         security_context="OOP: Wallet property exposes vulnerability"
     )
     sim_state.execution_tracker.add_step(
-        "Get Public Key", 
+        "Extract Public Key from Blockchain", 
         "checking", 
-        f"e={sim_state.wallets['Alice'].pub_key[0]}, n={sim_state.wallets['Alice'].pub_key[1]}",
-        code_snippet="pub_key = wallet.pub_key  # (e, n)\n# Public key exposes modulus n = p * q",
-        security_context="OOP: Wallet.pub_key property access"
+        "Step 1: Reading Alice's public key from blockchain transactions",
+        code_snippet="# Real-world process:\n# 1. Scan blockchain for Alice's transactions\n# 2. Extract public key from transaction signatures\n# 3. Public key is visible: (e, n)\npub_key = wallet.pub_key  # (e=17, n=3233)",
+        security_context="Attack: Public key extraction from blockchain"
+    )
+    e, n = sim_state.wallets['Alice'].pub_key
+    sim_state.execution_tracker.add_step(
+        "Extract Public Key", 
+        "passed", 
+        f"Public Key: e={e}, n={n}",
+        code_snippet="# Public key components:\n# e = 17 (public exponent)\n# n = 3233 (modulus = p * q)",
+        security_context="Cryptography: Public key components exposed"
     )
     sim_state.logs.append("[EVE] === CRACKING RSA KEY ===")
-    sim_state.logs.append(f"[EVE] Alice's Public Key: e={sim_state.wallets['Alice'].pub_key[0]}, n={sim_state.wallets['Alice'].pub_key[1]}")
-    sim_state.logs.append("[EVE] Running factorization algorithm...")
+    sim_state.logs.append(f"[EVE] Step 1: Extracted Alice's Public Key: e={e}, n={n}")
+    
+    sim_state.execution_tracker.add_step(
+        "Analyze Modulus Size", 
+        "checking", 
+        "Step 2: Checking if modulus is factorable (small primes)",
+        code_snippet="# Real-world RSA cracking:\n# Large n (2048+ bits) = secure\n# Small n (< 100 bits) = vulnerable\n# Our demo: n=3233 (12 bits) = VULNERABLE\nif n < 10000:\n    return 'Vulnerable to brute force'",
+        security_context="Cryptography: Modulus size determines security"
+    )
+    sim_state.execution_tracker.add_step(
+        "Analyze Modulus Size", 
+        "passed", 
+        f"n={n} is small (vulnerable to factorization)",
+        code_snippet="# n = 3233 is small\n# Can be factored in milliseconds\n# Real RSA uses n > 2^2048",
+        security_context="Security: Weak key size detected"
+    )
+    sim_state.logs.append(f"[EVE] Step 2: Modulus n={n} is small - vulnerable to factorization")
     
     sim_state.execution_tracker.add_step(
         "Factorize RSA Modulus", 
         "checking", 
-        "Brute force factorization",
-        code_snippet="class CryptoEngine:\n    @staticmethod\n    def crack_rsa(pub_key):\n        n = pub_key[1]\n        for p in range(2, int(math.sqrt(n))):\n            if n % p == 0:\n                return (p, n//p)",
-        security_context="OOP: Static method in CryptoEngine class - factorization attack"
+        "Step 3: Running brute force factorization algorithm",
+        code_snippet="# Factorization algorithm:\n# Try dividing n by primes from 2 to sqrt(n)\n# For n=3233: sqrt(3233) ≈ 57\n# Check: 3233 % 61 == 0? Yes!\n# Found: p=61, q=3233/61=53\nfor p in range(2, int(math.sqrt(n)) + 1):\n    if n % p == 0:\n        q = n // p\n        return (p, q)",
+        security_context="OOP: CryptoEngine.crack_rsa() - factorization attack"
     )
+    sim_state.logs.append("[EVE] Step 3: Running factorization algorithm...")
+    sim_state.logs.append("[EVE] Testing primes: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61...")
     start_time = time.time()
     private_key = CryptoEngine.crack_rsa(sim_state.wallets['Alice'].pub_key)
     elapsed = (time.time() - start_time) * 1000
@@ -1073,8 +1452,10 @@ def crack_rsa():
             security_context="Security: Wallet compromised - unauthorized access gained"
         )
         sim_state.logs.append(f"[EVE] SUCCESS! Factored n={sim_state.wallets['Alice'].pub_key[1]} into p=61, q=53")
-        sim_state.logs.append(f"[EVE] Calculated private key d={d} in {elapsed:.2f}ms")
-        sim_state.logs.append("[EVE] Alice's wallet is now COMPROMISED")
+        sim_state.logs.append(f"[EVE] Step 4: Calculated phi(n) = (p-1)*(q-1) = 3120")
+        sim_state.logs.append(f"[EVE] Step 5: Calculated private key d={d} using modular inverse")
+        sim_state.logs.append(f"[EVE] Total time: {elapsed:.2f}ms (weak RSA cracked!)")
+        sim_state.logs.append("[EVE] Alice's wallet is now COMPROMISED - Eve can sign transactions as Alice")
         sim_state.execution_tracker.pop_function()
         return jsonify({'success': True, 'message': f'Key cracked in {elapsed:.2f}ms', 'private_key': d})
     
@@ -1088,21 +1469,29 @@ def acquire_hash_power():
     """Acquire 51% hash power for attack"""
     sim_state.execution_tracker.clear()
     sim_state.execution_tracker.push_function("acquire_hash_power")
+    # Explain 51% acquisition method
     sim_state.execution_tracker.add_step(
-        "Start Hash Power Acquisition", 
+        "51% Hash Power Acquisition", 
         "checking", 
-        "Renting/buying mining equipment",
-        code_snippet="hash_power_distribution = {\n    'Eve': 0.0,\n    'Honest': 100.0\n}",
-        security_context="Attack: Acquiring majority hash power"
+        "Method: Renting hash power from cloud mining services",
+        code_snippet="# Real-world 51% acquisition:\n# 1. Rent from NiceHash, MiningRigRentals (cloud mining)\n# 2. Cost: ~$50-100M for 51% of Bitcoin network\n# 3. Temporary control (hours to days)\n# 4. Attackers don't own hardware, just rent it",
+        security_context="Attack: Cloud mining rental enables 51% control"
+    )
+    sim_state.execution_tracker.add_step(
+        "Acquisition Method", 
+        "passed", 
+        "Rented 51% hash power from cloud mining pools",
+        code_snippet="# Hash power rented:\n# - NiceHash: Largest marketplace\n# - MiningRigRentals: Direct rentals\n# - Cost-effective for short-term attacks\nhash_power['Eve'] = 51.0  # Rented majority",
+        security_context="Attack: Temporary hash power control"
     )
     sim_state.hash_power_distribution["Eve"] = 51.0
     sim_state.hash_power_distribution["Honest"] = 49.0
     sim_state.execution_tracker.add_step(
-        "Acquire Equipment", 
+        "Hash Power Acquired", 
         "passed", 
-        "Equipment acquired",
-        code_snippet="# Renting/buying mining hardware\n# Acquiring computational resources",
-        security_context="Attack: Infrastructure setup"
+        "51% hash power acquired via cloud mining rental",
+        code_snippet="# Can now mine blocks faster\n# Attack window: Limited by rental duration\n# Cost: High but temporary",
+        security_context="Security: Network majority compromised"
     )
     sim_state.execution_tracker.add_step(
         "Update Hash Power", 
@@ -1172,12 +1561,16 @@ def mine_attack_block():
         code_snippet="if not alice_cracked:\n    return 'Key not compromised'",
         security_context="Identity Layer: Requires compromised key for theft"
     )
+    # Allow mining without key cracking - Eve can use her own coins or mine empty blocks
     if not sim_state.alice_cracked and sim_state.defense_mode != "STAKE_CBL":
-        sim_state.execution_tracker.add_step("Check Key Status", "failed", "Alice's key not cracked")
-        sim_state.execution_tracker.add_step("Result: FAILED", "failed", "Must crack Alice's key first")
-        sim_state.execution_tracker.pop_function()
-        return jsonify({'success': False, 'message': 'Must crack Alice\'s key first'})
-    sim_state.execution_tracker.add_step("Check Key Status", "passed", "Key status OK")
+        sim_state.execution_tracker.add_step(
+            "Check Key Status", 
+            "info", 
+            "Alice's key not cracked - will use Eve's own coins or empty blocks",
+            code_snippet="# Can mine blocks without cracking key:\n# - Empty blocks\n# - Eve's own transactions\n# - Double-spend Eve's coins",
+            security_context="Attack: 51% attack doesn't require key cracking"
+        )
+    sim_state.execution_tracker.add_step("Check Key Status", "passed", "Key status OK (or not needed)")
     
     # Initialize attack chain if needed
     sim_state.execution_tracker.add_step(
@@ -1227,18 +1620,33 @@ def mine_attack_block():
                 security_context="Attack: Double-spend attempt"
             )
             sim_state.logs.append("[EVE] Creating transaction: Eve -> Eve 10 BTC (double spend attempt)")
-        else:
+            transactions = [theft_tx]
+        elif sim_state.alice_cracked:
+            # Key is cracked - can create theft transaction
             theft_tx = Transaction("tx_attack_alice", "Alice", "Eve", 100.0, "stolen_sig_alice")
             sim_state.execution_tracker.add_step(
                 "Create Transaction", 
                 "passed", 
-                "Alice -> Eve 100 BTC (fraudulent)",
+                "Alice -> Eve 100 BTC (fraudulent - using stolen key)",
                 code_snippet="tx = Transaction('tx_attack', 'Alice', 'Eve', 100.0, stolen_sig)",
                 security_context="Attack: Fraudulent transaction using stolen key"
             )
             sim_state.logs.append("[EVE] Creating fraudulent transaction: Alice -> Eve 100 BTC")
             sim_state.logs.append("[EVE] Using stolen private key to sign transaction")
-        transactions = [theft_tx]
+            transactions = [theft_tx]
+        else:
+            # No key cracked - use Eve's own coins for double-spend attack
+            theft_tx = Transaction("tx_attack_eve", "Eve", "Eve", 10.0, "eve_sig_1")
+            sim_state.execution_tracker.add_step(
+                "Create Transaction", 
+                "passed", 
+                "Eve -> Eve 10 BTC (double spend - no key cracking needed)",
+                code_snippet="tx = Transaction('tx_attack', 'Eve', 'Eve', 10.0, eve_sig)",
+                security_context="Attack: Double-spend using own coins (realistic 51% attack)"
+            )
+            sim_state.logs.append("[EVE] Creating double-spend transaction: Eve -> Eve 10 BTC")
+            sim_state.logs.append("[EVE] No key cracking needed - using own coins (realistic 51% attack)")
+            transactions = [theft_tx]
     else:
         sim_state.execution_tracker.add_step("Create Transaction", "passed", "Empty block (no transaction)")
         transactions = []
@@ -1295,6 +1703,17 @@ def mine_attack_block():
     )
     new_block = Block(len(sim_state.attack_chain), prev_hash, miner_name, transactions)
     sim_state.attack_chain.append(new_block)
+    
+    # Track block for rate limiting
+    if miner_name not in sim_state.miner_blocks:
+        sim_state.miner_blocks[miner_name] = []
+    sim_state.miner_blocks[miner_name].append(new_block.timestamp)
+    
+    # Update reputation (attack blocks decrease reputation)
+    if miner_name not in sim_state.miner_reputation:
+        sim_state.miner_reputation[miner_name] = 50  # Start with neutral
+    sim_state.miner_reputation[miner_name] = max(0, sim_state.miner_reputation[miner_name] - 5)
+    
     sim_state.execution_tracker.add_step(
         "Mine Block", 
         "passed", 
@@ -1490,6 +1909,116 @@ def enable_cbl():
     sim_state.execution_tracker.pop_function()
     return jsonify({'success': True, 'message': 'CBL enabled'})
 
+@app.route('/api/enable_zk_stake', methods=['POST'])
+def enable_zk_stake():
+    """Enable Zero Knowledge Stake-CBL defense"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("enable_zk_stake")
+    sim_state.execution_tracker.add_step(
+        "Start ZK Stake Activation", 
+        "checking", 
+        "Enabling Zero Knowledge Stake-CBL (stake amounts & identities hidden)",
+        code_snippet="def enable_zk_stake():\n    defense_mode = 'ZK_STAKE_CBL'",
+        security_context="Defense: Activating ZK stake protection"
+    )
+    sim_state.defense_mode = "ZK_STAKE_CBL"
+    # Initialize ZK stake proofs (simulated - doesn't reveal actual stakes)
+    sim_state.zk_stake_proofs = {
+        "Miner1": 5000,
+        "Alice": 5000,
+        "Bob": 5000,
+        "Eve": 200,
+    }
+    sim_state.zk_whale_backing = 10000  # Hidden whale backing
+    sim_state.execution_tracker.add_step(
+        "Set Defense Mode", 
+        "passed", 
+        "Mode: ZK_STAKE_CBL",
+        code_snippet="defense_mode = 'ZK_STAKE_CBL'  # ZK stake validation",
+        security_context="Defense: ZK stake mode activated"
+    )
+    sim_state.execution_tracker.add_step(
+        "Initialize ZK Proofs", 
+        "passed", 
+        "ZK proofs created (stake amounts & identities hidden)",
+        code_snippet="zk_stake_proofs = {miner: proof_value}\n# Proofs validate stake without revealing amounts",
+        security_context="Privacy: ZK proofs protect whale identities"
+    )
+    sim_state.logs.append("[NETWORK] === ZERO KNOWLEDGE STAKE-CBL ACTIVATED ===")
+    sim_state.logs.append("[NETWORK] Stake amounts and identities are hidden (ZK proofs)")
+    sim_state.logs.append("[NETWORK] Whales protected from identification")
+    sim_state.execution_tracker.pop_function()
+    return jsonify({'success': True, 'message': 'ZK Stake-CBL enabled'})
+
+@app.route('/api/enable_ecc', methods=['POST'])
+def enable_ecc():
+    """Enable ECC cryptography upgrade"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("enable_ecc")
+    sim_state.execution_tracker.add_step(
+        "Start ECC Upgrade", 
+        "checking", 
+        "Upgrading cryptography from RSA to ECC",
+        code_snippet="def enable_ecc():\n    wallet = Wallet(name, balance, stake, is_ecc=True)",
+        security_context="Cryptography: ECC upgrade"
+    )
+    sim_state.wallets['Alice'] = Wallet("Alice", sim_state.wallets['Alice'].balance, sim_state.wallets['Alice'].stake, is_ecc=True)
+    sim_state.wallets['Bob'] = Wallet("Bob", sim_state.wallets['Bob'].balance, sim_state.wallets['Bob'].stake, is_ecc=True)
+    sim_state.wallets['Eve'] = Wallet("Eve", sim_state.wallets['Eve'].balance, sim_state.wallets['Eve'].stake, is_ecc=True)
+    sim_state.alice_cracked = False
+    sim_state.execution_tracker.add_step(
+        "Upgrade to ECC", 
+        "passed", 
+        "All wallets upgraded to ECC (secp256k1)",
+        code_snippet="wallet.is_ecc = True\n# ECC keys generated (secure)",
+        security_context="Cryptography: ECC prevents key cracking"
+    )
+    sim_state.logs.append("[NETWORK] === ECC CRYPTOGRAPHY UPGRADED ===")
+    sim_state.logs.append("[NETWORK] All wallets now use ECC (secp256k1)")
+    sim_state.logs.append("[NETWORK] RSA key cracking no longer possible")
+    sim_state.execution_tracker.pop_function()
+    return jsonify({'success': True, 'message': 'ECC enabled'})
+
+@app.route('/api/enable_zk_cbl', methods=['POST'])
+def enable_zk_cbl():
+    """Enable final ZK Stake-CBL network (combines ZK stake + ECC)"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("enable_zk_cbl")
+    sim_state.execution_tracker.add_step(
+        "Start Final Upgrade", 
+        "checking", 
+        "Enabling ZK Stake-CBL network (ZK stake + ECC)",
+        code_snippet="def enable_zk_cbl():\n    defense_mode = 'ZK_CBL'\n    enable_ecc()\n    enable_zk_stake()",
+        security_context="Defense: Final comprehensive protection"
+    )
+    # Enable ECC first
+    sim_state.wallets['Alice'] = Wallet("Alice", sim_state.wallets['Alice'].balance, sim_state.wallets['Alice'].stake, is_ecc=True)
+    sim_state.wallets['Bob'] = Wallet("Bob", sim_state.wallets['Bob'].balance, sim_state.wallets['Bob'].stake, is_ecc=True)
+    sim_state.wallets['Eve'] = Wallet("Eve", sim_state.wallets['Eve'].balance, sim_state.wallets['Eve'].stake, is_ecc=True)
+    sim_state.alice_cracked = False
+    # Enable ZK stake
+    sim_state.defense_mode = "ZK_STAKE_CBL"
+    sim_state.zk_stake_proofs = {
+        "Miner1": 5000,
+        "Alice": 5000,
+        "Bob": 5000,
+        "Eve": 200,
+    }
+    sim_state.zk_whale_backing = 10000
+    sim_state.execution_tracker.add_step(
+        "Final Network State", 
+        "passed", 
+        "ZK Stake-CBL + ECC active (complete protection)",
+        code_snippet="# ZK stake validation + ECC cryptography\n# Prevents 51% attacks and key theft",
+        security_context="Security: Complete protection enabled"
+    )
+    sim_state.logs.append("[NETWORK] === ZK STAKE-CBL NETWORK ACTIVE ===")
+    sim_state.logs.append("[NETWORK] ECC: Prevents key cracking")
+    sim_state.logs.append("[NETWORK] ZK Stake: Validates without revealing amounts/identities")
+    sim_state.logs.append("[NETWORK] CBL: Prevents consecutive mining")
+    sim_state.execution_tracker.pop_function()
+    return jsonify({'success': True, 'message': 'ZK Stake-CBL network enabled'})
+
 @app.route('/api/enable_stake_cbl', methods=['POST'])
 def enable_stake_cbl():
     """Enable Stake-CBL + ECC defense"""
@@ -1587,6 +2116,252 @@ def reset():
     sim_state.logs.append("[SYSTEM] Simulation reset to initial state")
     sim_state.execution_tracker.pop_function()
     return jsonify({'success': True, 'message': 'Simulation reset'})
+
+@app.route('/api/enable_sybil', methods=['POST'])
+def enable_sybil():
+    """Manually enable Sybil mode for Scenario 3"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("enable_sybil")
+    sim_state.execution_tracker.add_step(
+        "Enable Sybil Mode", 
+        "checking", 
+        "Creating multiple identities to bypass CBL",
+        code_snippet="def enable_sybil():\n    use_sybil = True\n    create_sybil_identities()",
+        security_context="Attack: Sybil attack mode activated"
+    )
+    sim_state.use_sybil = True
+    sim_state.create_sybil_identities()
+    sim_state.execution_tracker.add_step(
+        "Sybil Mode Enabled", 
+        "passed", 
+        "Eve_A and Eve_B identities created",
+        code_snippet="use_sybil = True  # Sybil attack active",
+        security_context="Attack: Multiple identities ready"
+    )
+    sim_state.logs.append("[EVE] === SYBIL MODE ENABLED ===")
+    sim_state.logs.append("[EVE] Created Eve_A and Eve_B identities")
+    sim_state.logs.append("[EVE] Can now alternate miners to bypass CBL")
+    sim_state.execution_tracker.pop_function()
+    return jsonify({'success': True, 'message': 'Sybil mode enabled'})
+
+@app.route('/api/enable_hybrid', methods=['POST'])
+def enable_hybrid():
+    """Enable Hybrid defense mode (CBL + Stake + Rate Limit)"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("enable_hybrid")
+    sim_state.execution_tracker.add_step(
+        "Start Hybrid Activation", 
+        "checking", 
+        "Enabling comprehensive hybrid defense",
+        code_snippet="def enable_hybrid():\n    defense_mode = 'HYBRID'",
+        security_context="Defense: Activating hybrid protection"
+    )
+    sim_state.defense_mode = "HYBRID"
+    sim_state.execution_tracker.add_step(
+        "Set Defense Mode", 
+        "passed", 
+        "Mode: HYBRID",
+        code_snippet="defense_mode = 'HYBRID'  # All checks enabled",
+        security_context="Defense: Hybrid mode activated"
+    )
+    sim_state.execution_tracker.add_step(
+        "Hybrid Features", 
+        "passed", 
+        "CBL + Stake Weight + Rate Limit + PoW + TX Validation",
+        code_snippet="# All security checks active\n# Comprehensive defense",
+        security_context="Security: Multi-layer protection active"
+    )
+    sim_state.logs.append("[NETWORK] === HYBRID DEFENSE ACTIVATED ===")
+    sim_state.logs.append("[NETWORK] All security checks enabled:")
+    sim_state.logs.append("[NETWORK] - Proof-of-Work validation")
+    sim_state.logs.append("[NETWORK] - Transaction signature validation")
+    sim_state.logs.append("[NETWORK] - Consecutive Block Limit (CBL)")
+    sim_state.logs.append("[NETWORK] - Stake-weighted validation")
+    sim_state.logs.append("[NETWORK] - Time-based rate limiting")
+    sim_state.logs.append("[NETWORK] - Chain length validation")
+    sim_state.execution_tracker.pop_function()
+    return jsonify({'success': True, 'message': 'Hybrid defense enabled'})
+
+# Demo control endpoints
+demo_state = {
+    'running': False,
+    'paused': False,
+    'current_scenario': None,
+    'step': 0
+}
+
+@app.route('/api/demo/start', methods=['POST'])
+def demo_start():
+    """Start automated demo"""
+    demo_state['running'] = True
+    demo_state['paused'] = False
+    demo_state['step'] = 0
+    return jsonify({'success': True, 'message': 'Demo started', 'state': demo_state})
+
+@app.route('/api/demo/pause', methods=['POST'])
+def demo_pause():
+    """Pause automated demo"""
+    demo_state['paused'] = True
+    return jsonify({'success': True, 'message': 'Demo paused', 'state': demo_state})
+
+@app.route('/api/demo/resume', methods=['POST'])
+def demo_resume():
+    """Resume automated demo"""
+    demo_state['paused'] = False
+    return jsonify({'success': True, 'message': 'Demo resumed', 'state': demo_state})
+
+@app.route('/api/demo/stop', methods=['POST'])
+def demo_stop():
+    """Stop automated demo"""
+    demo_state['running'] = False
+    demo_state['paused'] = False
+    demo_state['current_scenario'] = None
+    demo_state['step'] = 0
+    return jsonify({'success': True, 'message': 'Demo stopped', 'state': demo_state})
+
+@app.route('/api/demo/status', methods=['GET'])
+def demo_status():
+    """Get demo execution status"""
+    return jsonify({'success': True, 'state': demo_state})
+
+@app.route('/api/run_scenario/<int:scenario_num>', methods=['POST'])
+def run_scenario(scenario_num):
+    """Run a specific scenario (1-5)"""
+    if scenario_num < 1 or scenario_num > 5:
+        return jsonify({'success': False, 'message': f'Invalid scenario number: {scenario_num}. Must be 1-5'})
+    
+    demo_state['current_scenario'] = scenario_num
+    demo_state['step'] = 0
+    
+    scenario_names = {
+        1: "Bitcoin Vulnerability (LEGACY)",
+        2: "Static CBL Defense",
+        3: "Sybil Attack",
+        4: "Stake-CBL + ECC Defense",
+        5: "Hybrid Defense"
+    }
+    
+    return jsonify({
+        'success': True, 
+        'message': f'Scenario {scenario_num} queued: {scenario_names[scenario_num]}',
+        'scenario': scenario_num
+    })
+
+@app.route('/api/mine_multiple_attack', methods=['POST'])
+def mine_multiple_attack():
+    """Mine multiple attack blocks at once"""
+    data = request.get_json() or {}
+    count = data.get('count', 3)
+    
+    results = []
+    for i in range(count):
+        # Check prerequisites
+        if sim_state.hash_power_distribution["Eve"] < 51.0:
+            return jsonify({'success': False, 'message': 'Must acquire 51% hash power first'})
+        # Allow mining multiple blocks without key cracking
+        # Will use Eve's own coins or empty blocks (realistic 51% attack)
+        
+        # Mine block directly
+        if not sim_state.attack_chain:
+            sim_state.attack_chain = [sim_state.honest_chain.chain[0]]
+        
+        # Create transaction if first block
+        transactions = []
+        if len(sim_state.attack_chain) == 1:
+            if sim_state.defense_mode == "STAKE_CBL":
+                transactions = [Transaction("tx_attack_eve", "Eve", "Eve", 10.0, "eve_sig_1")]
+            elif sim_state.alice_cracked:
+                # Key is cracked - can create theft transaction
+                transactions = [Transaction("tx_attack_alice", "Alice", "Eve", 100.0, "stolen_sig_alice")]
+            else:
+                # No key cracked - use Eve's own coins for double-spend attack
+                transactions = [Transaction("tx_attack_eve", "Eve", "Eve", 10.0, "eve_sig_1")]
+        
+        # Determine miner (handle Sybil)
+        miner_name = "Eve"
+        if sim_state.defense_mode == "CBL" and sim_state.use_sybil:
+            sim_state.create_sybil_identities()
+            block_num = len(sim_state.attack_chain)
+            miner_name = "Eve_B" if block_num % 2 == 0 else "Eve_A"
+        elif sim_state.defense_mode == "STAKE_CBL":
+            sim_state.create_sybil_identities()
+            block_num = len(sim_state.attack_chain)
+            miner_name = "Eve_B" if block_num % 2 == 0 else "Eve_A"
+        
+        prev_hash = sim_state.attack_chain[-1].hash
+        new_block = Block(len(sim_state.attack_chain), prev_hash, miner_name, transactions)
+        sim_state.attack_chain.append(new_block)
+        
+        # Track for rate limiting
+        if miner_name not in sim_state.miner_blocks:
+            sim_state.miner_blocks[miner_name] = []
+        sim_state.miner_blocks[miner_name].append(new_block.timestamp)
+        
+        results.append({'success': True, 'block': new_block.to_dict()})
+    
+    return jsonify({
+        'success': True,
+        'message': f'Mined {len(results)} attack blocks',
+        'blocks': results
+    })
+
+@app.route('/api/mine_multiple_honest', methods=['POST'])
+def mine_multiple_honest():
+    """Mine multiple honest blocks at once"""
+    data = request.get_json() or {}
+    count = data.get('count', 2)
+    
+    results = []
+    miners = ['Alice', 'Bob', 'Miner1', 'Miner2']
+    for i in range(count):
+        miner_name = miners[i % len(miners)]
+        new_block = sim_state.mine_honest_block(miner_name)
+        results.append({'success': True, 'block': new_block.to_dict()})
+    
+    return jsonify({
+        'success': True,
+        'message': f'Mined {len(results)} honest blocks',
+        'blocks': results
+    })
+
+@app.route('/api/upgrade_network', methods=['POST'])
+def upgrade_network():
+    """Stateful network upgrade - upgrades defenses without resetting"""
+    sim_state.execution_tracker.clear()
+    sim_state.execution_tracker.push_function("upgrade_network")
+    
+    current_mode = sim_state.defense_mode
+    next_mode = {
+        "LEGACY": "CBL",
+        "CBL": "STAKE_CBL",
+        "STAKE_CBL": "HYBRID",
+        "HYBRID": "HYBRID"  # Already at max
+    }.get(current_mode, "LEGACY")
+    
+    if next_mode == "CBL":
+        sim_state.defense_mode = "CBL"
+        sim_state.logs.append("[NETWORK] === NETWORK UPGRADE: CBL ACTIVATED ===")
+        sim_state.logs.append("[NETWORK] Network upgraded from LEGACY to CBL (no reset)")
+    elif next_mode == "STAKE_CBL":
+        sim_state.defense_mode = "STAKE_CBL"
+        sim_state.wallets['Alice'] = Wallet("Alice", sim_state.wallets['Alice'].balance, 5000, is_ecc=True)
+        sim_state.wallets['Bob'] = Wallet("Bob", sim_state.wallets['Bob'].balance, 5000, is_ecc=True)
+        sim_state.wallets['Eve'] = Wallet("Eve", sim_state.wallets['Eve'].balance, 200, is_ecc=True)
+        sim_state.alice_cracked = False  # Reset crack status since ECC is secure
+        sim_state.logs.append("[NETWORK] === NETWORK UPGRADE: STAKE-CBL + ECC ACTIVATED ===")
+        sim_state.logs.append("[NETWORK] Network upgraded from CBL to STAKE-CBL + ECC (no reset)")
+    elif next_mode == "HYBRID":
+        sim_state.defense_mode = "HYBRID"
+        sim_state.logs.append("[NETWORK] === NETWORK UPGRADE: HYBRID DEFENSE ACTIVATED ===")
+        sim_state.logs.append("[NETWORK] Network upgraded to HYBRID mode (all defenses active)")
+    
+    sim_state.execution_tracker.pop_function()
+    return jsonify({
+        'success': True,
+        'message': f'Network upgraded from {current_mode} to {next_mode}',
+        'old_mode': current_mode,
+        'new_mode': next_mode
+    })
 
 if __name__ == '__main__':
     print("=" * 60)
